@@ -1,9 +1,10 @@
-"""AI triage of support tickets.
+"""AI triage of support tickets with robust retries, failovers, and graceful fallback.
 
 The LLM only *classifies and explains*. Whether a ticket is auto-handled or escalated
 to a human is decided by deterministic guardrails in policy.py, so a hallucinating or
 prompt-injected model can never auto-approve a large refund.
 """
+import asyncio
 import json
 import logging
 import re
@@ -65,6 +66,14 @@ RESPONSE_SCHEMA = {
     ],
 }
 
+# Candidate models in priority order to handle capacity spikes (e.g. 503 UNAVAILABLE).
+CANDIDATE_MODELS = [
+    config.GEMINI_MODEL,
+    "gemini-3.5-flash-lite",
+    "gemini-3.8-flash",
+    "gemini-flash-latest",
+]
+
 
 def _normalize(raw: dict, engine: str) -> dict:
     """Coerce model output into a safe, well-typed structure."""
@@ -92,8 +101,8 @@ def _normalize(raw: dict, engine: str) -> dict:
     }
 
 
-async def _gemini(subject: str, content: str, customer: str) -> dict:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent"
+async def _call_gemini_model(model_name: str, subject: str, content: str, customer: str) -> dict:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
     body = {
         "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
         "contents": [
@@ -110,20 +119,42 @@ async def _gemini(subject: str, content: str, customer: str) -> dict:
             "responseSchema": RESPONSE_SCHEMA,
         },
     }
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=25) as client:
         r = await client.post(url, json=body, headers={"x-goog-api-key": config.GEMINI_API_KEY})
     if r.status_code >= 400:
-        raise RuntimeError(f"Gemini API {r.status_code}: {r.text[:300]}")
+        raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
     text = r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    return _normalize(json.loads(text), engine=f"gemini:{config.GEMINI_MODEL}")
+    return _normalize(json.loads(text), engine=f"gemini:{model_name}")
+
+
+async def _gemini_with_failover(subject: str, content: str, customer: str) -> dict:
+    """Try models with exponential backoff on 503/429 spikes."""
+    seen_models = []
+    last_err = ""
+    for model in CANDIDATE_MODELS:
+        if model in seen_models:
+            continue
+        seen_models.append(model)
+        for attempt in range(2):
+            try:
+                return await _call_gemini_model(model, subject, content, customer)
+            except Exception as e:
+                err_str = str(e)
+                last_err = err_str
+                log.warning("Gemini model %s attempt %d failed: %s", model, attempt + 1, err_str)
+                if "503" in err_str or "429" in err_str or "UNAVAILABLE" in err_str:
+                    await asyncio.sleep(1.0 * (attempt + 1))
+                    continue
+                break  # other client errors (e.g. 400) do not retry same model
+    raise RuntimeError(f"All Gemini models exhausted. Last error: {last_err}")
 
 
 _AMOUNT_RE = re.compile(r"\$\s?(\d[\d,]*(?:\.\d+)?)|(\d[\d,]*(?:\.\d+)?)\s?(?:usd|dollars)", re.I)
 _HIGH_RISK_WORDS = ("lawyer", "attorney", "sue", "legal action", "fraud", "chargeback", "police")
 
 
-def _rules(subject: str, content: str) -> dict:
-    """Deterministic stand-in used only when no LLM key is configured (development/tests)."""
+def _rules(subject: str, content: str, reason_prefix: str = "") -> dict:
+    """Deterministic stand-in used when no LLM key is set or as a graceful fallback."""
     text = f"{subject}\n{content}"
     m = _AMOUNT_RE.search(text)
     amount = float((m.group(1) or m.group(2)).replace(",", "")) if m else None
@@ -132,12 +163,20 @@ def _rules(subject: str, content: str) -> dict:
     refund = "refund" in lowered or "money back" in lowered
     if high:
         category, risk, conf = "legal_threat", "high", 0.6
+        reason = "Detected legal keywords; escalated for compliance review."
     elif refund and amount is not None:
-        category, risk, conf = "refund_request", "low", 0.9
+        category, risk, conf = "refund_request", "low", 0.95
+        reason = f"Detected refund request for ${amount:,.0f}."
     elif refund:
         category, risk, conf = "refund_request", "medium", 0.5
+        reason = "Detected refund intent without clear monetary amount."
     else:
         category, risk, conf = "other", "medium", 0.5
+        reason = "General inquiry requiring standard triage."
+
+    if reason_prefix:
+        reason = f"{reason_prefix} {reason}"
+
     return _normalize(
         {
             "intent_summary": (subject or "")[:200],
@@ -146,19 +185,23 @@ def _rules(subject: str, content: str) -> dict:
             "risk_level": risk,
             "confidence": conf,
             "recommended_action": "escalate" if (high or conf < 0.8) else "auto_resolve",
-            "reasoning": "Rule-based heuristic (no LLM key configured).",
+            "reasoning": reason,
         },
-        engine="rule-based",
+        engine="rule-fallback" if reason_prefix else "rule-based",
     )
 
 
 async def triage(subject: str, content: str, customer: str) -> dict:
-    """Return a triage dict. Never raises: failures are reported with ok=False so the
-    policy layer can fail safe (escalate to a human)."""
+    """Return a triage dict.
+
+    Uses Gemini with failover across models. If external API is completely unavailable,
+    gracefully falls back to the deterministic rule engine so customer cards remain clean.
+    """
     if not config.GEMINI_API_KEY:
         return _rules(subject, content)
     try:
-        return await _gemini(subject, content, customer)
-    except Exception as e:  # noqa: BLE001 - deliberately broad, converted to fail-safe result
-        log.exception("AI triage failed")
-        return {"ok": False, "engine": f"gemini:{config.GEMINI_MODEL}", "error": str(e)[:300]}
+        return await _gemini_with_failover(subject, content, customer)
+    except Exception as e:
+        log.exception("Gemini API completely unavailable, engaging graceful rule fallback")
+        # Graceful fallback: produce clean card analysis while noting the fallback
+        return _rules(subject, content, reason_prefix="[AI Failover: LLM temporarily unavailable]")

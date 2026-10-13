@@ -32,7 +32,7 @@ STAGE_CLOSED = os.getenv("HUBSPOT_STAGE_CLOSED", "")  # approved / auto-resolved
 
 # --- AI triage ---
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 # --- Policy guardrails (enforced in code, never delegated to the LLM) ---
 REFUND_APPROVAL_THRESHOLD = _float("REFUND_APPROVAL_THRESHOLD", 100.0)  # USD, above -> human approval
