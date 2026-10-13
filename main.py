@@ -68,12 +68,15 @@ async def slack_interactive(payload: str = Form(...)):
     data = json.loads(payload)
     
     action_value = data["actions"][0]["value"]
-    user_name = data.get("user", {}).get("username", "user")
+    user = data.get("user", {})
+    # Slack mention format: rendered as the reviewer's current display name (e.g. @Operator).
+    # Falls back to the legacy username if the user ID is unavailable.
+    reviewer = f"<@{user['id']}>" if user.get("id") else f"@{user.get('username', 'user')}"
     
     if action_value == "approve_refund":
-        new_text = f"✅ *Approved by @{user_name}*. \nProcessing $500 refund via Stripe API..."
+        new_text = f"✅ *Approved by {reviewer}*. \nProcessing $500 refund via Stripe API..."
     else:
-        new_text = f"❌ *Rejected by @{user_name}*. \nRefund cancelled."
+        new_text = f"❌ *Rejected by {reviewer}*. \nRefund cancelled."
         
     response_url = data["response_url"]
     async with httpx.AsyncClient() as client:
