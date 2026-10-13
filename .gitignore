@@ -40,3 +40,8 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Databases & local state
+*.db
+*.sqlite
+*.sqlite3
