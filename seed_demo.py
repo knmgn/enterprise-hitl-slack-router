@@ -103,10 +103,19 @@ async def cleanup(c: httpx.AsyncClient) -> int:
     return n
 
 
-async def main(arg: str) -> None:
+async def main(arg: str, interval: float = 6.0, initial_wait: float = 5.0) -> None:
     async with client() as c:
         if arg == "cleanup":
             print(f"Archived {await cleanup(c)} demo ticket(s)")
+            return
+        if arg == "sequence":
+            print(f"Starting in {initial_wait:.0f}s... Switch to HubSpot and start recording!")
+            await asyncio.sleep(initial_wait)
+            for k in ["small", "large", "ambiguous"]:
+                tid = await create_ticket(c, k)
+                print(f"Created {k} ticket #{tid}")
+                await asyncio.sleep(interval)
+            print("All 3 demo tickets created!")
             return
         keys = list(SCENARIOS) if arg == "all" else [arg]
         for k in keys:
@@ -114,6 +123,9 @@ async def main(arg: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or sys.argv[1] not in (*SCENARIOS, "all", "cleanup"):
-        sys.exit(__doc__)
-    asyncio.run(main(sys.argv[1]))
+    if len(sys.argv) < 2 or sys.argv[1] not in (*SCENARIOS, "all", "cleanup", "sequence"):
+        sys.exit(__doc__ + "    python seed_demo.py sequence [interval_sec] [wait_sec]\n")
+    interval = float(sys.argv[2]) if len(sys.argv) > 2 else 6.0
+    wait = float(sys.argv[3]) if len(sys.argv) > 3 else 5.0
+    asyncio.run(main(sys.argv[1], interval, wait))
+
