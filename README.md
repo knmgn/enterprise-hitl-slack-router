@@ -12,6 +12,12 @@
 
 ---
 
+## 📺 Live Demo (88s)
+
+https://github.com/user-attachments/assets/8dece56e-620f-4814-b54a-cc1e0bdad102
+
+---
+
 ## 📌 Executive Summary
 
 Modern AI-driven customer operations can automate routine inquiries, but enterprise safety demands that **high-risk actions** (e.g., financial refunds, legal disputes, sensitive account changes) are protected by a reliable human safety net.
